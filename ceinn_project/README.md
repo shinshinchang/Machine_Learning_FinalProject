@@ -1,7 +1,5 @@
 # CEINN for MovieLens-1M (PyTorch)
 
-這份程式是依照你上傳的 CEINN 研究計畫，做出一個**可執行、可訓練、可評估、可做消融實驗**的 PyTorch 版本。
-
 ## 目前支援
 - MovieLens-1M 預處理
 - leave-one-out 序列推薦切分
@@ -15,12 +13,6 @@
   - latent confounder prototype backdoor adjustment
   - short-term / long-term heads
 - HR@10 / NDCG@10 評估
-- 消融開關：
-  - `--ablation none`
-  - `--ablation no_pt`
-  - `--ablation no_hd`
-  - `--ablation no_mtl`
-  - `--ablation no_causal`
 
 ## 重要說明
 因為 MovieLens-1M 沒有「曝光紀錄」「加入收藏」「停留時間」「完整觀看率」這些欄位，所以研究計畫中的部分概念必須做工程近似：
@@ -29,8 +21,6 @@
 2. **長期價值標籤**：用較高評分（例如 >= 4）近似正向長期價值。
 3. **短期誘惑標籤**：用一般互動事件（評分存在）近似。
 4. **經濟屬性**：MovieLens 沒有價格，因此用 `genres / year / popularity` 當作 item side features。
-
-也就是說，這份程式是「**以 MovieLens-1M 可以做的版本，把研究計畫盡量落地**」，能支撐你先完成實驗與報告；之後再把 Amazon Beauty 接進來即可。
 
 ## 檔案結構
 - `preprocess_movielens.py`：資料預處理
@@ -70,6 +60,3 @@ python train_ceinn.py --config config.yaml --ablation no_causal
 - `best_model_*.pt`
 - `metrics_*.json`
 - `preprocessed/*.pkl`
-
-## 建議先跑
-若你怕 VSCode 第一次太慢，先把 `epochs` 改成 3。

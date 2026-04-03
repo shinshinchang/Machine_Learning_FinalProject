@@ -1,0 +1,44 @@
+data:
+  data_dir: ../
+  min_user_interactions: 20
+  max_seq_len: 50
+  num_eval_negatives: 100
+  valid_size: 1
+  test_size: 1
+
+training:
+  seed: 42
+  batch_size: 128
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.0001
+  neg_samples: 5
+  grad_clip: 5.0
+  device: auto
+  num_workers: 0
+  amp: false
+
+model:
+  d_model: 64
+  n_heads: 4
+  n_layers: 2
+  dropout: 0.2
+  semantic_dim: 64
+  economic_dim: 64
+  num_confounder_prototypes: 8
+  tau_propensity_clip: 10.0
+  lambda_loss_aversion: 2.0
+  alpha_gain: 0.7
+  beta_loss: 0.8
+  gate_temperature: 0.5
+  long_term_weight: 0.7
+  short_term_weight: 1.0
+  kappa_init: 1.0
+
+loss:
+  lambda_ortho: 0.01
+  lambda_mtl: 0.2
+  lambda_l2_extra: 0.0
+
+output:
+  save_dir: ./outputs

@@ -15,12 +15,12 @@
   - latent confounder prototype backdoor adjustment
   - short-term / long-term heads
 - HR@10 / NDCG@10 評估
-- 消融開關：
-  - `--ablation none`
-  - `--ablation no_pt`
-  - `--ablation no_hd`
-  - `--ablation no_mtl`
-  - `--ablation no_causal`
+- 消融實驗支援（Ablation Studies）：
+  - `--ablation none` : 完整 CEINN 模型
+  - `--ablation w/o_pt` : 無 Prospect Theory（直接用原始效用，無動態參考點）
+  - `--ablation w/o_hd` : 無 Hyperbolic Discounting（基本因果注意力遮罩）
+  - `--ablation w/o_mtl` : 無多任務學習（僅經濟頭，無語意頭）
+  - `--ablation w/o_causal` : 無因果調整（無 SNIPS 權重、無潛在混淆因子）
 
 ## 重要說明
 因為 MovieLens-1M 沒有「曝光紀錄」「加入收藏」「停留時間」「完整觀看率」這些欄位，所以研究計畫中的部分概念必須做工程近似：
@@ -57,12 +57,19 @@ python preprocess_movielens.py --data_dir ../ --out_dir ./outputs/preprocessed
 python train_ceinn.py --config config.yaml --ablation none
 ```
 
-## 4. 消融
+## 4. 消融實驗
 ```bash
-python train_ceinn.py --config config.yaml --ablation no_pt
-python train_ceinn.py --config config.yaml --ablation no_hd
-python train_ceinn.py --config config.yaml --ablation no_mtl
-python train_ceinn.py --config config.yaml --ablation no_causal
+# 無 Prospect Theory（基本效用評分）
+python train_ceinn.py --config config.yaml --ablation w/o_pt
+
+# 無 Hyperbolic Discounting（基本自注意力）
+python train_ceinn.py --config config.yaml --ablation w/o_hd
+
+# 無多任務學習（僅長期經濟信號）
+python train_ceinn.py --config config.yaml --ablation w/o_mtl
+
+# 無因果調整（無 SNIPS、無混淆因子）
+python train_ceinn.py --config config.yaml --ablation w/o_causal
 ```
 
 ## 5. 輸出

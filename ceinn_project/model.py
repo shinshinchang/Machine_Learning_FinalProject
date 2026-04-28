@@ -136,6 +136,11 @@ class CEINN(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, 1),
         )
+        self.single_pred_head = nn.Sequential(
+            nn.Linear(economic_dim + d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
         self.do_item_proj = nn.Linear(d_model + economic_dim + d_model, d_model)
         self.do_out = nn.Linear(d_model, 1)
 
@@ -214,15 +219,26 @@ class CEINN(nn.Module):
         do_abs_util, candidate_item_emb = self.do_intervention_utility(
             economic_state, candidate_items, use_causal=flags.use_causal
         )
-        ref = self.dynamic_reference(economic_state, do_abs_util)
-        delta = do_abs_util - ref.unsqueeze(-1)
-        long_score = self.smooth_prospect_value(delta, use_pt=flags.use_pt)
+        
+        # w/o_pt: skip dynamic reference point and prospect theory, use raw utility
+        if flags.use_pt:
+            ref = self.dynamic_reference(economic_state, do_abs_util)
+            delta = do_abs_util - ref.unsqueeze(-1)
+            long_score = self.smooth_prospect_value(delta, use_pt=True)
+        else:
+            # For w/o_pt ablation: use raw utility directly as long-term score
+            long_score = do_abs_util
+            ref = torch.zeros(do_abs_util.size(0), device=do_abs_util.device)
 
         short_score = self.short_term_score(semantic_state, candidate_item_emb)
-        if not flags.use_mtl:
-            short_score = torch.zeros_like(short_score)
-
-        total_score = short_score + long_score / (1.0 + F.softplus(self.kappa))
+        if flags.use_mtl:
+            total_score = short_score + long_score / (1.0 + F.softplus(self.kappa))
+        else:
+            # w/o_mtl: disable short/long multi-task heads and use a single prediction head.
+            econ = economic_state.unsqueeze(1).expand(-1, candidate_items.size(1), -1)
+            total_score = self.single_pred_head(torch.cat([econ, candidate_item_emb], dim=-1)).squeeze(-1)
+            short_score = torch.zeros_like(total_score)
+            long_score = torch.zeros_like(total_score)
 
         ortho = torch.mean((semantic_state * economic_state[:, : semantic_state.size(1)]).sum(dim=-1).pow(2))
         propensity = self.item_propensity[candidate_items].clamp(min=1e-6)
@@ -237,4 +253,115 @@ class CEINN(nn.Module):
             'reference_point': ref,
             'snips_weight': snips_w,
             'ortho_reg': ortho,
+        }
+
+
+class SASRec(nn.Module):
+    def __init__(
+        self,
+        num_items: int,
+        d_model: int = 64,
+        n_heads: int = 4,
+        n_layers: int = 2,
+        dropout: float = 0.2,
+        max_seq_len: int = 50,
+        **kwargs,
+    ):
+        super().__init__()
+        self.item_emb = nn.Embedding(num_items + 1, d_model, padding_idx=0)
+        self.pos_emb = nn.Embedding(max_seq_len + 1, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def _encode_sequence(self, seq):
+        bsz, seq_len = seq.size()
+        pos_ids = torch.arange(seq_len, device=seq.device).unsqueeze(0).expand(bsz, -1)
+        x = self.item_emb(seq) + self.pos_emb(pos_ids)
+        x = self.dropout(x)
+
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=seq.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        key_padding_mask = seq.eq(0)
+        x = self.encoder(x, mask=causal_mask, src_key_padding_mask=key_padding_mask)
+        x = self.final_norm(x)
+        return x
+
+    def _last_hidden(self, seq_hidden, seq):
+        lengths = (seq != 0).sum(dim=1).clamp(min=1)
+        idx = lengths - 1
+        return seq_hidden[torch.arange(seq.size(0), device=seq.device), idx]
+
+    def forward(self, seq, candidate_items, flags=None):
+        seq_hidden = self._encode_sequence(seq)
+        user_state = self._last_hidden(seq_hidden, seq)
+
+        cand_emb = self.item_emb(candidate_items)
+        scores = torch.sum(cand_emb * user_state.unsqueeze(1), dim=-1)
+        zeros = torch.zeros_like(scores)
+        ones = torch.ones_like(scores)
+        return {
+            'total_score': scores,
+            'short_score': zeros,
+            'long_score': zeros,
+            'do_abs_util': scores,
+            'reference_point': torch.zeros(scores.size(0), device=scores.device),
+            'snips_weight': ones,
+            'ortho_reg': torch.tensor(0.0, device=scores.device),
+        }
+
+
+class GRU4Rec(nn.Module):
+    def __init__(
+        self,
+        num_items: int,
+        d_model: int = 64,
+        n_layers: int = 1,
+        dropout: float = 0.2,
+        **kwargs,
+    ):
+        super().__init__()
+        self.item_emb = nn.Embedding(num_items + 1, d_model, padding_idx=0)
+        self.gru = nn.GRU(
+            input_size=d_model,
+            hidden_size=d_model,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=dropout if n_layers > 1 else 0.0,
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def _last_hidden(self, seq_hidden, seq):
+        lengths = (seq != 0).sum(dim=1).clamp(min=1)
+        idx = lengths - 1
+        return seq_hidden[torch.arange(seq.size(0), device=seq.device), idx]
+
+    def forward(self, seq, candidate_items, flags=None):
+        seq_emb = self.item_emb(seq)
+        seq_hidden, _ = self.gru(seq_emb)
+        user_state = self.dropout(self._last_hidden(seq_hidden, seq))
+
+        cand_emb = self.item_emb(candidate_items)
+        scores = torch.sum(cand_emb * user_state.unsqueeze(1), dim=-1)
+        zeros = torch.zeros_like(scores)
+        ones = torch.ones_like(scores)
+        return {
+            'total_score': scores,
+            'short_score': zeros,
+            'long_score': zeros,
+            'do_abs_util': scores,
+            'reference_point': torch.zeros(scores.size(0), device=scores.device),
+            'snips_weight': ones,
+            'ortho_reg': torch.tensor(0.0, device=scores.device),
         }

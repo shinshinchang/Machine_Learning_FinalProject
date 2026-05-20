@@ -1,0 +1,52 @@
+# CEINN — .gitignore
+
+# Raw and processed data (too large for VCS)
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/README.md
+data/processed/*
+!data/processed/.gitkeep
+
+# Validation artefacts are reproducible from raw data; do not commit.
+data/raw/validation_log.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Experiment outputs (Phase 6+)
+checkpoints/
+results/
+runs/
+wandb/
+*.log
+
+eda/outputs/
+main_artifacts/
+past_works/
+sub_artifacts/
+tests/

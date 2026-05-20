@@ -1,0 +1,176 @@
+# =============================================================================
+# CEINN — MovieLens 10M configuration
+# =============================================================================
+# Same structure as amazon_beauty.yaml. MovieLens 10M is ~50x larger by
+# interaction count, so memory-sensitive defaults are unavoidable. The
+# original §6.2-suggested values (batch=512, max_epochs=200, etc.) are kept
+# in a comment beside each line as a "scale-up recipe" for a beefier host.
+# =============================================================================
+
+dataset:
+  name: movielens_10M
+  paths:
+    ratings: data/raw/ml-10M100K/ratings.dat
+    movies:  data/raw/ml-10M100K/movies.dat
+    tags:    data/raw/ml-10M100K/tags.dat
+  encoding:
+    ratings: utf-8
+    movies:  iso-8859-1            # required for Latin-1 accents in titles
+    tags:    utf-8
+
+# -----------------------------------------------------------------------------
+# Validation baselines (EDA_report_Movielens10M.md §1, §2.1, §4.1, §4.3)
+# -----------------------------------------------------------------------------
+validation:
+  n_interactions_raw:     10000054
+  n_interactions_5core:   9998816
+  n_users:                69878
+  n_items_5core:          10196
+  n_items_raw:            10681
+  rating_half_star_share: 0.205
+  rating_share_5:         0.154
+  rating_entropy:         2.758393
+  n_genres:               19
+  n_tag_events:           95580
+  tag_singleton_share:    0.559
+  n_tag_vocab:            15240
+  time_range_start:       '1995-01-09'
+  time_range_end:         '2009-01-05'
+  time_span_days:         5109
+
+tolerance:
+  count_exact:    0
+  ratio_pp:       0.001
+  coverage_pp:    0.005
+  entropy_abs:    0.01
+  date_days:      1
+  span_days:      2
+
+# =============================================================================
+# Phase 2: preprocessing & feature engineering
+# =============================================================================
+preprocess:
+  output_dir: data/processed/movielens_10m
+
+  five_core:
+    min_count: 5
+
+  id_remap:
+    pad_index: 0
+    start_index: 1
+
+  session:
+    boundary_seconds: 60          # <60s adjacent ratings = same session
+    within_session_dt: PAD        # intra-session Δt → bin 0 (PAD)
+
+  split:
+    strategy: leave_one_out_temporal
+    tie_breaker: file_order
+
+  dt_bucketing:
+    n_bins: 64                    # bin 0 = PAD; real bins 1..63
+    base: 10
+    fit_on: train
+
+  truncation:
+    max_seq_len: 200              # §6.2
+
+  rating_bins:
+    n_bins: 11                    # {0=PAD, 1..10 = half-star ratings × 2}
+
+  exclude_year_from_train:
+    enabled: true
+    year_threshold: 2009
+
+  genre_red:
+    n_genres: 19
+    no_genre_sentinel: "(no genres listed)"
+    idf_smooth: true
+
+  dynamic_Z:
+    count_source: train_only
+
+# =============================================================================
+# Phase 6: training & evaluation
+# =============================================================================
+training:
+  seed: 0
+  output_dir: runs/movielens_10m
+  device: auto
+
+  # ---- Architecture --------------------------------------------------------
+  # The §6.1 recommendation was d=128; we keep that but it's the heaviest
+  # tunable for RAM. If you OOM, drop to d=64 first.
+  architecture:
+    d:                    128       # §6.1 ML recommendation
+    n_layers:             2
+    n_heads:              4         # d=128 must be divisible by n_heads
+    dropout:              0.1
+    propensity_hidden:    64
+    propensity_z_emb_dim: 16
+    discriminator_hidden: null
+
+  # ---- Optimisation --------------------------------------------------------
+  # §6.2 recipe was batch=512, max_epochs=200, patience=10. The values
+  # below are the memory-safe defaults; comments show the §6.2 ideal.
+  lr:                  0.0005
+  batch_size:          32          # §6.2 ideal: 512
+  val_batch_size:      32          # §6.2 ideal: 256
+  max_epochs:          100         # §6.2 ideal: 200 (early stop will catch best)
+  early_stop_patience: 10
+  grad_clip:           1.0
+  lambda_reg:          0.00001
+
+  # ---- Loss configuration --------------------------------------------------
+  # §9.2 Failure Mode 2: ML's max 1/p_i ≈ 7000 — Self-Normalised IPS is the
+  # robust default; Clipped IPS at very large τ also works but is sensitive.
+  lambda_adv:          0.1
+  ips_clip_tau:        100.0       # §6.2 ML range {50, 100, 200}
+  loss_mode_hint:      snips_choice  # informational only; ablation.loss_mode controls
+
+  # ---- Confounder bucketisation (§3.2.4 dynamic Z) -------------------------
+  # train.py discretises the FINAL per-item cumulative count into this many
+  # quantile buckets, then uses bucket as the static Z for both the
+  # discriminator and propensity estimator. The dynamic-Z signal precomputed
+  # in Phase 2 (`dynamic_Z.pkl`) is used as the PopPress cost component.
+  n_z_buckets:         10
+
+  # ---- Propensity training ------------------------------------------------
+  propensity_warmup_epochs: 1
+  propensity_lr:            0.001
+
+  # ---- Validation throttle ------------------------------------------------
+  # ML has ~70k val users; computing full-ranking each epoch is the bottleneck.
+  # Setting val_max_users to e.g. 2000 cuts a 70-second val into ~2 seconds,
+  # without affecting the FINAL evaluate.py report.
+  val_max_users:       2000
+
+  # ---- Ablation toggles ---------------------------------------------------
+  ablation:
+    use_rating_emb:       true
+    loss_mode:            snips_choice    # ML default = SNIPS (variance-safer)
+    use_grl:              true
+    use_economics:        true
+    use_cost:             true
+    fixed_lambda_u:       false
+    fixed_lambda_u_value: 0.5
+    use_temporal_emb:     true
+
+  # ---- Two-stage hyperparameter search ------------------------------------
+  hparam_search_space:
+    stage1_n_samples:   20
+    stage1_max_epochs:  50
+    stage1_top_k:       3
+    stage2_max_epochs:  200
+    search_seed:        42
+    space:
+      d:            [32, 64, 128]
+      n_layers:     [1, 2, 3]
+      n_heads:      [1, 2, 4]
+      dropout:      [0.1, 0.2, 0.3, 0.5]
+      lr:           [0.0001, 0.0005, 0.001]
+      lambda_adv:   [0.001, 0.01, 0.1, 1.0]
+      lambda_reg:   [0.00001, 0.0001, 0.001]
+      ips_clip_tau: [50.0, 100.0, 200.0]
+
+  final_seeds: [0, 1, 2, 3, 4]

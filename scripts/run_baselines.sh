@@ -31,11 +31,6 @@
 #     DEVICE      torch device          (default: auto)
 #     EXTRA_ARGS  extra args to train_baseline.py
 #
-# CausalRec (Tier-2 causal baseline) is NOT in the default BASELINES set: it
-# is visually-aware and runs on Amazon Beauty only. Add it explicitly, e.g.
-#     BASELINES="causalrec" DATASETS="amazon_beauty" bash scripts/run_baselines.sh
-# It is auto-skipped on any non-Beauty dataset.
-#
 # The script exits on first failure so a broken setup doesn't accumulate
 # half-finished runs. Use `set +e` if you'd rather press on.
 # =============================================================================
@@ -78,14 +73,6 @@ for ds in ${DATASETS}; do
         exit 1
     fi
     for bs in ${BASELINES}; do
-        # CausalRec is visually-aware → Amazon Beauty only. Skip it on any
-        # dataset without item images (e.g. MovieLens) rather than letting
-        # the run fail in load_visual_features.
-        if [[ "${bs}" == "causalrec" && "${ds}" != "amazon_beauty" ]]; then
-            echo ""
-            echo ">>> SKIP baseline=causalrec dataset=${ds} (no item images; Beauty-only)"
-            continue
-        fi
         for seed in ${SEEDS}; do
             n_runs=$((n_runs + 1))
             echo ""

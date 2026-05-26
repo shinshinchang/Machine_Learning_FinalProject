@@ -21,7 +21,7 @@
 
 _default:
   seed: 0
-  max_epochs: 200
+  max_epochs: 300 ###
   early_stop_patience: 10
   lr: 5e-4
   weight_decay: 1.0e-5
@@ -78,6 +78,7 @@ gru4rec:
     d: 128
     dropout: 0.1         # matches CEINN's ML backbone dropout
     batch_size: 512
+    max_epochs: 300
 
 # -----------------------------------------------------------------------------
 # SASRec — causal Transformer + shift-by-one full-vocab CE.
@@ -137,36 +138,3 @@ bert4rec:
     d: 128
     dropout: 0.2
     batch_size: 512
-
-# -----------------------------------------------------------------------------
-# CausalRec — visually-aware causal recommender (Qiu et al., 2021).
-# Tier-2 causal baseline. Non-sequential (slots beside BPR-MF): reuses the
-# BPR pair pipeline, trains multitask BPR over 3 branches, and applies the
-# Total-Indirect-Effect (TIE) correction at inference.
-#
-# AMAZON BEAUTY ONLY: CausalRec needs per-item image features. MovieLens-10M
-# has no item images, so there is NO movielens_10m section here — a MovieLens
-# run will fail loudly in `load_visual_features`. The MovieLens cell in the
-# results table is reported as "—".
-#
-# Notes on the hparams:
-#   * d = 64 aligns with BPR-MF (NOT CausalRec's original 32) so capacity is
-#     comparable to the other CEINN baselines.
-#   * weight_decay folds in the paper's lambda1 (L2 on embeddings).
-#   * lambda2 is the TIE debiasing strength (paper lambda2). 1.0 = remove the
-#     full direct visual effect; worth sweeping {0,0.2,…,1.2} in an ablation.
-#   * visual_dim = 4096 matches McAuley's precomputed CNN features.
-#   * visual_features_path defaults to <preprocess.output_dir>/visual_features.npy
-#     if left unset.
-# -----------------------------------------------------------------------------
-causalrec:
-  _default:
-    grad_clip: 0.0          # BPR gradients are well-bounded; no clipping
-    weight_decay: 1.0e-5    # = paper's lambda1 (L2 regularisation on embeddings)
-    lambda2: 1.0            # TIE debiasing strength (sweep {0,0.2,…,1.2})
-    visual_dim: 4096        # McAuley precomputed CNN feature dim
-  amazon_beauty:
-    d: 64                   # aligned to BPR-MF (not CausalRec's original 32)
-    batch_size: 256
-    # visual_features_path: <phase2>/amazon_beauty/visual_features.npy
-  # NO movielens_10m: CausalRec is Amazon-Beauty-only (needs item images).

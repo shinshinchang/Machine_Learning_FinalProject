@@ -12,9 +12,6 @@ Supported baselines (Plan §5.1):
     sasrec      — Self-Attentive Sequential Recommender (causal Transformer,
                   full-vocab CE — same training loop as GRU4Rec)
     bert4rec    — Bidirectional Transformer with Cloze / MLM training
-    causalrec   — Visually-aware causal recommender with TIE debiasing
-                  (Qiu et al., 2021). Tier-2 causal baseline; AMAZON BEAUTY
-                  ONLY (needs per-item image features; MovieLens has none).
 
 Usage
 -----
@@ -39,12 +36,6 @@ Usage
         --config configs/amazon_beauty.yaml \\
         --baseline bert4rec --seed 0 \\
         --override training.mask_prob=0.15
-
-    # CausalRec on Amazon Beauty (seed 0); needs visual features path in config
-    python train_baseline.py \\
-        --config configs/amazon_beauty.yaml \\
-        --baseline causalrec --seed 0 \\
-        --override training.lambda2=0.8
 
 Outputs (under <training.output_dir>/baselines/<baseline>/<run_name>/):
     config.yaml          # effective config (merged dataset + baseline + overrides)
@@ -87,13 +78,6 @@ Design notes
   in `random_mask_batch`, and loss is computed only at masked positions.
   At eval time the model's own `score_all_items` injects [MASK] at the
   prediction slot, so `validate_full_ranking` needs no special-case.
-
-* CausalRec reuses the SAME pair pipeline as BPR-MF (`BPRPairsDataset` +
-  `collate_bpr`); it is non-sequential. Training is multitask BPR over
-  three branches (no causal correction). Its `score_all_items` applies
-  the Total-Indirect-Effect correction at eval, so `validate_full_ranking`
-  is again untouched. CausalRec needs per-item visual features, loaded by
-  `load_visual_features`; it is therefore Amazon-Beauty-only.
 
 * The val/test "input sequence" for every baseline is the user's full
   training sequence truncated to `max_seq_len`. The held-out target is
@@ -140,8 +124,8 @@ from utils.metrics import (                                         # noqa: E402
 )
 
 from models.baselines import (                                      # noqa: E402
-    BERT4RecModel, BPRMFModel, CausalRecModel, GRU4RecModel, PopRec,
-    SASRecModel, build_baseline,
+    BERT4RecModel, BPRMFModel, GRU4RecModel, PopRec, SASRecModel,
+    build_baseline,
 )
 
 
@@ -243,48 +227,6 @@ def load_popularity_groups(processed_dir: Path) -> Optional[Dict[int, str]]:
         return None
     with open(path, "rb") as f:
         return pickle.load(f)["labels"]
-
-
-def load_visual_features(
-    cfg: Dict[str, Any],
-    train_cfg: Dict[str, Any],
-    n_items: int,
-    visual_dim: int,
-    pad_index: int = 0,
-) -> torch.Tensor:
-    """
-    Load the per-item visual-feature matrix for CausalRec.
-
-    Expects a `.npy` of shape (n_items+1, visual_dim) aligned to the
-    Phase-2 item indexing (row 0 = PAD = zeros). The path is read from
-    `training.visual_features_path` first, then `preprocess.output_dir /
-    visual_features.npy`.
-
-    Raises a clear error if absent — CausalRec is visually-aware and must
-    not be silently run without features (that would collapse it toward
-    BPR-MF with a meaningless TIE term).
-    """
-    cand = train_cfg.get("visual_features_path", None)
-    if cand is None:
-        pdir = Path(cfg["preprocess"]["output_dir"])
-        cand = pdir / "visual_features.npy"
-    path = Path(cand)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"CausalRec needs a visual-feature matrix at {path}, shape "
-            f"(n_items+1={n_items + 1}, visual_dim={visual_dim}). Build it in "
-            f"Phase-2 (item_id → ASIN → McAuley CNN feature). CausalRec is "
-            f"Amazon-Beauty-only; do not run it on a dataset without item images."
-        )
-    arr = np.load(path)
-    vf = torch.from_numpy(arr).to(torch.get_default_dtype())
-    if vf.shape != (n_items + 1, visual_dim):
-        raise ValueError(
-            f"visual_features at {path} have shape {tuple(vf.shape)}, "
-            f"expected ({n_items + 1}, {visual_dim})."
-        )
-    vf[pad_index].zero_()
-    return vf
 
 
 # =============================================================================
@@ -757,44 +699,6 @@ def train_bert4rec_one_epoch(
             ignore_index=pad_index,
         )
 
-        optim.zero_grad()
-        loss.backward()
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optim.step()
-
-        total_loss += float(loss.item())
-        n_steps += 1
-    return EpochStats(loss=total_loss / max(1, n_steps), n_steps=n_steps)
-
-
-def train_causalrec_one_epoch(
-    model: CausalRecModel,
-    loader: DataLoader,
-    optim: torch.optim.Optimizer,
-    *,
-    device: torch.device,
-    grad_clip: float = 0.0,
-) -> EpochStats:
-    """
-    Multitask-BPR training step for CausalRec (paper Eq. 23–24).
-
-    Reuses the BPR pair pipeline (`BPRPairsDataset` / `collate_bpr`) exactly
-    like BPR-MF — one (user, pos, neg) triple per step. The only difference
-    is the loss: CausalRec sums three pairwise-BPR terms over its branches
-    (full fused score, visual notice, and match·visual-match). NO causal
-    correction is applied during training (the TIE correction is inference-
-    only, matching the paper's "biased training" protocol).
-    """
-    model.train()
-    total_loss = 0.0
-    n_steps = 0
-    for batch in loader:
-        u = batch["user_ids"].to(device)
-        ip = batch["pos_items"].to(device)
-        in_ = batch["neg_items"].to(device)
-
-        loss = model.bpr_multitask_loss(u, ip, in_)
         optim.zero_grad()
         loss.backward()
         if grad_clip > 0:
@@ -1293,118 +1197,6 @@ def run_bert4rec(
     return model, best_val_ndcg10, best_epoch
 
 
-def run_causalrec(
-    *,
-    loader,
-    cfg: Dict[str, Any],
-    train_cfg: Dict[str, Any],
-    seen_items: Dict[int, Set[int]],
-    out_dir: Path,
-    device: torch.device,
-    n_users: int,
-    n_items: int,
-    pad_index: int,
-    max_seq_len: int,
-    csv_path: Path,
-) -> Tuple[nn.Module, float, int]:
-    """
-    Train CausalRec with multitask BPR (biased), evaluate with TIE.
-
-    Non-sequential — reuses the BPR pair pipeline (like BPR-MF). Requires
-    per-item visual features (Amazon Beauty only). The early-stopping
-    metric (Val NDCG@10) is computed on the TIE-corrected scores, so we
-    select the checkpoint that ranks best AFTER debiasing.
-    """
-    d = int(train_cfg.get("d", 64))
-    lr = float(train_cfg.get("lr", 5e-4))
-    batch_size = int(train_cfg.get("batch_size", 256))
-    max_epochs = int(train_cfg.get("max_epochs", 200))
-    patience = int(train_cfg.get("early_stop_patience", 10))
-    weight_decay = float(train_cfg.get("weight_decay", 1e-5))
-    grad_clip = float(train_cfg.get("grad_clip", 0.0))
-    val_batch_size = int(train_cfg.get("val_batch_size", 256))
-    num_workers = int(train_cfg.get("num_workers", 0))
-    visual_dim = int(train_cfg.get("visual_dim", 4096))
-    lambda2 = float(train_cfg.get("lambda2", 1.0))
-
-    # Visual features are mandatory for CausalRec. This also enforces the
-    # "Amazon Beauty only" decision: a MovieLens run will fail loudly here.
-    visual_features = load_visual_features(
-        cfg, train_cfg, n_items=n_items, visual_dim=visual_dim, pad_index=pad_index,
-    )
-
-    model = CausalRecModel(
-        n_users=n_users, n_items=n_items, d=d,
-        visual_features=visual_features, visual_dim=visual_dim,
-        lambda2=lambda2, pad_index=pad_index,
-    ).to(device)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"    Model: CausalRec, n_users={n_users}, n_items={n_items}, d={d}, "
-          f"visual_dim={visual_dim}, lambda2={lambda2}")
-    print(f"    Trainable params: {n_params:,}  (visual features frozen)")
-
-    pairs = BPRPairsDataset(loader.train_seqs, n_items=n_items, pad_index=pad_index)
-    pair_loader = DataLoader(
-        pairs, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, collate_fn=collate_bpr, drop_last=False,
-    )
-    print(f"    Train pairs: {len(pairs):,}; batch_size={batch_size}; "
-          f"steps/epoch ≈ {len(pairs)//max(1,batch_size):,}")
-
-    optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    best_val_ndcg10 = -1.0
-    best_epoch = -1
-    epochs_since_improve = 0
-
-    for epoch in range(1, max_epochs + 1):
-        t0 = time.time()
-        stats = train_causalrec_one_epoch(
-            model, pair_loader, optim, device=device, grad_clip=grad_clip,
-        )
-        val_metrics, _ranks, _items = validate_full_ranking(
-            model, loader.val_seqs, loader.train_seqs, seen_items,
-            max_seq_len=max_seq_len, device=device, pad_index=pad_index,
-            batch_size=val_batch_size,
-        )
-        ndcg10 = val_metrics.get("ndcg@10", 0.0)
-        epoch_time = time.time() - t0
-
-        with open(csv_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"{epoch},{stats.n_steps},{stats.loss:.4f},"
-                f"{val_metrics.get('ndcg@5', 0):.4f},"
-                f"{val_metrics.get('ndcg@10', 0):.4f},"
-                f"{val_metrics.get('ndcg@20', 0):.4f},"
-                f"{val_metrics.get('hr@10', 0):.4f},"
-                f"{val_metrics.get('mrr', 0):.4f},"
-                f"{epoch_time:.1f}\n"
-            )
-        print(f"  Epoch {epoch:3d}/{max_epochs}  L_BPR={stats.loss:.4f}  "
-              f"val_NDCG@10={ndcg10:.4f}  ({epoch_time:.1f}s)")
-
-        save_checkpoint(out_dir / "last.ckpt", model, extra={
-            "epoch": epoch, "val_ndcg10": ndcg10, "baseline": "causalrec",
-        })
-        if ndcg10 > best_val_ndcg10:
-            best_val_ndcg10 = ndcg10
-            best_epoch = epoch
-            epochs_since_improve = 0
-            save_checkpoint(out_dir / "best.ckpt", model, extra={
-                "epoch": epoch, "val_ndcg10": ndcg10, "baseline": "causalrec",
-            })
-        else:
-            epochs_since_improve += 1
-            if epochs_since_improve >= patience:
-                print(f"  Early stopping at epoch {epoch}: no improvement "
-                      f"for {patience} epochs (best @ epoch {best_epoch}, "
-                      f"NDCG@10={best_val_ndcg10:.4f})")
-                break
-
-    load_checkpoint(out_dir / "best.ckpt", model, map_location=device)
-    return model, best_val_ndcg10, best_epoch
-
-
 # =============================================================================
 # Test-set evaluation block (mirrors evaluate.py but standalone)
 # =============================================================================
@@ -1452,8 +1244,7 @@ def main() -> int:
     ap.add_argument("--config", required=True, type=Path,
                     help="Per-dataset YAML (provides dataset paths + name).")
     ap.add_argument("--baseline", required=True,
-                    choices=["poprec", "bpr_mf", "gru4rec", "sasrec", "bert4rec",
-                             "causalrec"],
+                    choices=["poprec", "bpr_mf", "gru4rec", "sasrec", "bert4rec"],
                     help="Baseline to train.")
     ap.add_argument("--baseline-config", type=Path,
                     default=Path(__file__).parent / "configs" / "baselines.yaml",
@@ -1555,16 +1346,10 @@ def main() -> int:
             out_dir=out_dir, device=device, n_items=n_items,
             pad_index=pad_index, max_seq_len=max_seq_len, csv_path=csv_path,
         )
-    elif args.baseline == "bert4rec":
+    else:  # bert4rec
         model, best_val_ndcg10, best_epoch = run_bert4rec(
             loader=loader, train_cfg=train_cfg, seen_items=seen_items,
             out_dir=out_dir, device=device, n_items=n_items,
-            pad_index=pad_index, max_seq_len=max_seq_len, csv_path=csv_path,
-        )
-    else:  # causalrec
-        model, best_val_ndcg10, best_epoch = run_causalrec(
-            loader=loader, cfg=cfg, train_cfg=train_cfg, seen_items=seen_items,
-            out_dir=out_dir, device=device, n_users=n_users, n_items=n_items,
             pad_index=pad_index, max_seq_len=max_seq_len, csv_path=csv_path,
         )
     train_time = time.time() - t_start

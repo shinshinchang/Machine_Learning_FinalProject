@@ -33,16 +33,6 @@ Five baselines provided here:
                     (Sun et al., 2019). Defined in `models/bert4rec.py`
                     and re-exported below.
 
-A separate "Tier-2" causal-recommendation baseline also lives here:
-
-    CausalRecModel — Visually-aware causal recommender with Total-Indirect-
-                    Effect debiasing (Qiu et al., 2021). Non-sequential
-                    (slots beside BPR-MF) but adds a visual branch and a
-                    test-time counterfactual correction. Requires per-item
-                    image features, so it is reported on Amazon Beauty only
-                    (MovieLens-10M has no item images). Defined in
-                    `models/causalrec.py` and re-exported below.
-
 Design constraints (kept consistent with `train.py` and the CEINN
 backbone in `models/sequential_backbone.py`):
 
@@ -73,8 +63,6 @@ import torch.nn.functional as F
 # a single `from models.baselines import ...` import surface.
 from models.sasrec import SASRecModel       # noqa: F401  (re-exported)
 from models.bert4rec import BERT4RecModel   # noqa: F401  (re-exported)
-# Tier-2 causal-recommendation baseline (visually-aware, TIE debiasing).
-from models.causalrec import CausalRecModel  # noqa: F401  (re-exported)
 
 
 # =============================================================================
@@ -458,10 +446,6 @@ def build_baseline(
     n_heads: int = 2,
     max_seq_len: int = 50,
     ff_mult: int = 4,
-    # CausalRec-only kwargs.
-    visual_features=None,
-    visual_dim: int = 4096,
-    lambda2: float = 1.0,
 ) -> nn.Module:
     """
     Dispatch a baseline name to its constructor with the correct kwargs.
@@ -476,10 +460,6 @@ def build_baseline(
     * `n_heads`, `max_seq_len`, and `ff_mult` are keyword-only and only
       consumed by SASRec/BERT4Rec; the older baselines silently ignore
       them.
-
-    * `visual_features`, `visual_dim`, and `lambda2` are consumed only by
-      CausalRec. `visual_features` MUST be supplied (a (n_items+1,
-      visual_dim) tensor) when `name` is "causalrec".
     """
     # Normalize: lowercase, strip both '-' and '_' so 'BPR-MF', 'bpr_mf',
     # 'sas-rec', 'bert-4-rec' all canonicalise to the same lookup key.
@@ -509,13 +489,7 @@ def build_baseline(
             max_seq_len=max_seq_len, dropout=dropout,
             ff_mult=ff_mult, pad_index=pad_index,
         )
-    if key in ("causalrec", "causal", "crec"):
-        return CausalRecModel(
-            n_users=n_users, n_items=n_items, d=d,
-            visual_features=visual_features, visual_dim=visual_dim,
-            lambda2=lambda2, pad_index=pad_index,
-        )
     raise ValueError(
         f"Unknown baseline name {name!r}. Expected one of: "
-        f"poprec, bpr_mf, gru4rec, sasrec, bert4rec, causalrec."
+        f"poprec, bpr_mf, gru4rec, sasrec, bert4rec."
     )

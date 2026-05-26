@@ -1,0 +1,233 @@
+# =============================================================================
+# CEINN — Amazon Beauty configuration
+# Phase 1 fields only: raw paths + EDA-derived validation baselines.
+# Phase 2+ fields (filtering rules, embedding dims, etc.) will be appended later.
+# =============================================================================
+
+dataset:
+  name: amazon_beauty
+  paths:
+    # Primary source: the 5-core filtered subset. EDA stats are computed on this file.
+    reviews_5core: data/raw/Beauty_5.json
+    # The unfiltered review dump (kept for reference / fallback only).
+    reviews:       data/raw/reviews_Beauty.json
+    # Item metadata (price / salesRank / categories / brand).
+    meta:          data/raw/meta_Beauty.json
+  encoding:
+    # All Amazon files in this distribution are ASCII-safe; UTF-8 is sufficient.
+    default: utf-8
+
+# -----------------------------------------------------------------------------
+# Validation baselines, directly transcribed from
+# EDA_report_AmazonBeauty.md §1, §2.1, §3.3, §4.
+# Every number below MUST be reproducible from data/raw/ alone — if not, the
+# reader logic in utils/data_io.py is wrong, NOT this file.
+# -----------------------------------------------------------------------------
+validation:
+  # §1, Table 1: dataset scale ----------------------------------------------
+  n_interactions:             198502     # |D| over the 5-core file
+  n_users:                     22363
+  n_items:                     12101     # unique asin in 5-core reviews
+  n_leaf_categories:             222     # union of leaf-level category labels
+                                          # across items that appear in reviews
+  # §2.1: rating distribution ----------------------------------------------
+  rating_share_5:           0.5770       # share of 5-star ratings
+
+  # §3.3 & §4: metadata coverages over interacted items --------------------
+  price_coverage:           0.9517       # share of items with a valid numeric price
+  salesrank_any_coverage:   0.982        # has salesRank under any category key
+  salesrank_beauty_coverage: 0.883       # has salesRank under the "Beauty" key
+  brand_coverage:           0.828        # has a non-empty brand string
+
+  # §1 & §5: timeline ------------------------------------------------------
+  time_range_start:        '2002-06-12'  # min(unixReviewTime) in UTC
+  time_range_end:          '2014-07-23'  # max(unixReviewTime) in UTC
+  time_span_days:           4424         # ceil((max - min) / 86400)
+
+# -----------------------------------------------------------------------------
+# Per-class tolerances. Tighter than the spec's worst case to surface drift
+# early. If a future check exceeds these but you believe the data is correct,
+# loosen the tolerance HERE rather than silently editing the comparison.
+# -----------------------------------------------------------------------------
+tolerance:
+  count_exact:    0        # absolute count differences must be 0
+  ratio_pp:       0.001    # rating shares: ±0.1 percentage points
+  coverage_pp:    0.005    # coverage ratios: ±0.5 percentage points
+  date_days:      1        # min/max UTC date: ±1 day (timezone interpretation slack)
+  span_days:      2        # time-span derived value: ±2 days
+
+# =============================================================================
+# Phase 2: preprocessing & feature engineering
+# Every preprocessing decision is parameterised here so the YAML is the
+# single source of truth — preprocess.py reads, never hard-codes.
+# =============================================================================
+preprocess:
+  # ---- Output layout --------------------------------------------------------
+  output_dir: data/processed/amazon_beauty
+
+  # ---- 5-core filtering -----------------------------------------------------
+  # Plan §2.1.1: Beauty_5.json is already 5-core (verified in Phase 1), so we
+  # use it directly as the source. Re-running 5-core on reviews_Beauty.json
+  # would be redundant and would risk diverging from EDA baselines.
+  five_core:
+    source: reviews_5core   # one of: reviews_5core | reviews_full
+    min_count: 5            # only consulted if source == reviews_full
+
+  # ---- ID remapping ---------------------------------------------------------
+  # Plan §2.1.2: 0 is reserved for PAD across users and items.
+  id_remap:
+    pad_index: 0
+    start_index: 1
+
+  # ---- Sequence split (leave-one-out, temporal) -----------------------------
+  split:
+    strategy: leave_one_out_temporal
+    # Tie-breaker among interactions at the exact same UTC second.
+    # Amazon unixReviewTime is day-precision so ties are frequent;
+    # using file-order is the only stable, reproducible choice.
+    tie_breaker: file_order
+
+  # ---- Δt log-bucketing -----------------------------------------------------
+  # Plan §2.1.4: 32 buckets for Amazon (Δt spans ~3.26 log-decades).
+  # Bin 0 is the PAD bin (first interaction of a user, no predecessor).
+  dt_bucketing:
+    n_bins: 32          # real bins 1..n_bins-1; bin 0 = PAD
+    base: 10
+    fit_on: train       # fit edges on training Δt's only
+
+  # ---- Sequence truncation --------------------------------------------------
+  truncation:
+    max_seq_len: 50     # covers P99 = 43 per EDA §2.2
+
+  # ---- Rating embedding bin count -------------------------------------------
+  # Ratings are integer 1..5; we use 6 slots so 0 is the PAD rating-bin.
+  rating_bins:
+    n_bins: 6           # {0=PAD, 1..5 = star ratings}
+
+  # ---- Leaf-category lookup (Plan §2.2.1) -----------------------------------
+  category:
+    primary_only: true        # one leaf per item; see extract_primary_leaf_category
+    min_item_count: 5         # rarer leaves merged into UNK
+    pad_index: 0              # 0 = PAD (unused items); 1 = UNK; 2.. = real
+
+  # ---- Brand lookup (Plan §2.2.2) ------------------------------------------
+  brand:
+    min_item_count: 10        # 82.1% long-tail per EDA → high cutoff
+    pad_index: 0              # 0 = PAD; 1 = UNK; 2.. = real
+
+  # ---- Price imputation (Plan §2.2.3) ---------------------------------------
+  price:
+    log_base: 10              # log10(price)
+    # Imputation order: per-leaf-category median → global median.
+    imputation: leaf_median_then_global
+
+  # ---- SalesRank Z bucketing (Plan §2.2.4) ---------------------------------
+  salesrank_Z:
+    n_bins: 10
+    log_base: 10
+    add_one: true             # log10(salesRank + 1)
+    median_bin_for_missing: 5  # 1.8% with no salesRank → bin 5
+    salesrank_key: Beauty     # try this first; fall back to any positive rank
+
+# =============================================================================
+# Phase 6: training & evaluation
+# All hyperparameters consumed by `train.py` and `evaluate.py` live here.
+# Phase 6 §6.3 two-stage hyperparameter search will overwrite the values in
+# `architecture`/`lr`/`lambda_adv`/etc. once Stage-2 selection is complete.
+# =============================================================================
+training:
+  # ---- Bookkeeping ----------------------------------------------------------
+  seed: 0
+  output_dir: runs/amazon_beauty
+  num_workers: 0          # set >0 only if dataset I/O becomes a bottleneck
+
+  # ---- Architecture (see Phase 4 sequential_backbone.py + ceinn.py) -------
+  # §6.1: Amazon Beauty suggested initial values
+  architecture:
+    d:            64
+    n_layers:     2
+    n_heads:      2       # d=64 must be divisible by n_heads
+    dropout:      0.2
+    propensity_hidden:    64
+    propensity_z_emb_dim: 16
+    discriminator_hidden: null   # null → default = min(128, max(64, 2*d))
+
+    # ---- Post-mortem fixes (root cause §3.1, §3.7) ------------------------
+    # Forwarded to `models.EconomicsUtility` via `build_ceinn_amazon`.
+    # See `models/economics_utility.py::BilinearValue` for rationale.
+    # Amazon is less affected than ML because it trains on the full catalog
+    # (no neg sampling), but identity-init still removes pointless early-
+    # epoch slack and `auto` cost scaling ensures cost is observably active.
+    value_mode:       bilinear   # bilinear | dot | bilinear_xavier
+    cost_scale_mode:  auto       # none | auto
+    cost_scale_target_ratio: 1.0
+
+  # ---- Optimisation ---------------------------------------------------------
+  lr:            0.0005   # 5e-4
+  batch_size:    256
+  val_batch_size: 256
+  max_epochs:    200
+  early_stop_patience: 15
+  grad_clip:     1.0      # L2 norm clipping; Phase 9 risk register
+  lambda_reg:    0.00001  # 1e-5  (Adam weight_decay)
+
+  # ---- Loss configuration ---------------------------------------------------
+  # See train.py "Loss strategy" note: we merge L_IPS into L_C as an
+  # IPS-weighted choice loss. The four ablation modes are:
+  #   ips_choice    : L_IPS-weighted choice loss (default)
+  #   snips_choice  : Self-Normalised IPS weights (A4)
+  #   seq_choice    : un-weighted CE over utilities (A2 w/o IPS)
+  lambda_adv:    0.1
+  # Amazon's max 1/p_i is small (salesRank Z is well-distributed across 10
+  # buckets), so plain `clipped` is fine; switch to clipped_self_normalized
+  # if propensity tail behaviour drifts at finetune time.
+  ips_variant:   clipped   # one of: clipped | self_normalized | clipped_self_normalized
+  ips_clip_tau:  30.0      # §6.2: Amazon Beauty τ ∈ {10, 20, 50}
+
+  # ---- GRL alpha schedule (§3.5 fix; consumed by upgraded train.py) -------
+  grl_alpha_warmup_epochs: 20
+
+  # ---- Propensity training --------------------------------------------------
+  # PropensityEstimator (§3.2.5) is BCE-trained on positive-vs-random labels
+  # before the main loop, then frozen-ish (still receives gradient through
+  # the main optimiser unless propensity_lr is 0).
+  propensity_warmup_epochs: 1
+  propensity_lr:            0.001
+
+  # ---- Ablation toggles -----------------------------------------------------
+  # Boolean / string switches; default values reproduce CEINN-Full.
+  # See Phase 7 (§5.1) for the ablation matrix.
+  ablation:
+    use_rating_emb:    true       # A1: set false to remove E_r
+    loss_mode:         ips_choice # A2/A4 control
+    use_grl:           true       # A3: false → no adversarial pressure
+    use_economics:     true       # A5: false → utility = V (dot product)
+    use_cost:          true       # A6: false → U = V (no λ_u·C term)
+    fixed_lambda_u:    false      # A7: true → λ_u = fixed_lambda_u_value
+    fixed_lambda_u_value: 0.5
+    use_temporal_emb:  true       # A8: false → zero out dt_ids
+
+  # ---- Two-stage hyperparameter search (Phase 6 §6.3) ----------------------
+  # The search driver script (Phase 8 / `scripts/hparam_search.py`, not yet
+  # written) reads this block. Stage-1 samples 20 configs uniformly from
+  # `hparam_search_space.stage1`; Stage-2 retrains top-3 with full epochs.
+  hparam_search_space:
+    stage1_n_samples:   20
+    stage1_max_epochs:  50
+    stage1_top_k:       3
+    stage2_max_epochs:  200
+    search_seed:        42
+    space:
+      d:           [32, 64, 128]
+      n_layers:    [1, 2, 3]
+      n_heads:     [1, 2, 4]
+      dropout:     [0.1, 0.2, 0.3, 0.5]
+      lr:          [0.0001, 0.0005, 0.001]
+      lambda_adv:  [0.001, 0.01, 0.1, 1.0]
+      lambda_reg:  [0.00001, 0.0001, 0.001]
+      ips_clip_tau: [10.0, 20.0, 50.0]      # Amazon: small τ
+      ips_variant: [clipped, self_normalized, clipped_self_normalized]
+
+  # ---- Final paper run (Phase 6 §6.4) --------------------------------------
+  # Five seeds; this list is consumed by `scripts/run_seeds.sh`.
+  final_seeds: [0, 1, 2, 3, 4]

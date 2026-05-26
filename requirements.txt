@@ -1,0 +1,11 @@
+pandas>=2.2.0
+numpy>=1.26.4
+scipy>=1.12.0
+matplotlib>=3.8.0   # 升級此項以確保擁有新版 Python 的預編譯 Wheel
+seaborn>=0.12.2
+pyyaml>=6.0.1
+tqdm>=4.65,<5.0
+scikit-learn>=1.3,<2.0
+pytest>=7.4
+networkx>=3.0,<4.0
+torch>=2.0.0,<3.0

@@ -56,3 +56,5 @@ Elegant Properties of Causal Recommendation Systems: Robust Generalization and P
 | movielens_10M | test_set | HR@10 | 0.0472 | 0.0496 | 0.2143 | 0.2331 | 0.1837 | 0.2468 |
 | movielens_10M | test_set | HR@20 | 0.0736 | 0.0811 | 0.3051 | 0.3260 | 0.2658 | 0.3408 |
 | movielens_10M | test_set | MRR | 0.0244 | 0.0261 | 0.1041 | 0.1122 | 0.0879 | 0.1249 |
+
+* note: Modules regarding to CausalRec of current version are deprecated. Any updates will be added onto new branches.
